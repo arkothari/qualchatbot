@@ -1,6 +1,8 @@
 import hmac
 
+from fastapi.responses import FileResponse
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import chat, data, storage
@@ -96,11 +98,14 @@ def upload_file(client_id: str, kind: str, file: UploadFile = File(...)):
     _client_or_404(client_id)
     try:
         client = storage.save_file(client_id, kind, file.filename or "", file.file)
-        data.get_connection(client_id)  # validate the file parses; fail fast
+    except storage.LoadRequired as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
+    try:
+        data.get_connection(client_id)  # validate the file parses; fail fast
     except Exception as e:
-        storage.delete_file(client_id, kind)
+        storage.delete_file(client_id, kind, force=True)
         raise HTTPException(400, f"Could not parse file: {e}")
     return client
 
@@ -110,7 +115,47 @@ def remove_file(client_id: str, kind: str):
     _client_or_404(client_id)
     if kind not in FILE_KINDS:
         raise HTTPException(404, "Unknown file kind")
-    return storage.delete_file(client_id, kind)
+    try:
+        return storage.delete_file(client_id, kind)
+    except storage.LoadRequired as e:
+        raise HTTPException(409, str(e))
+
+
+# ---- data loads and versions ---------------------------------------------
+@app.post("/api/clients/{client_id}/load/start", dependencies=[Depends(require_admin)])
+def start_load(client_id: str):
+    _client_or_404(client_id)
+    return storage.start_load(client_id)
+
+
+@app.post("/api/clients/{client_id}/load/finish", dependencies=[Depends(require_admin)])
+def finish_load(client_id: str):
+    _client_or_404(client_id)
+    return storage.finish_load(client_id)
+
+
+@app.get("/api/clients/{client_id}/versions", dependencies=[Depends(require_admin)])
+def versions(client_id: str):
+    _client_or_404(client_id)
+    return storage.list_versions(client_id)
+
+
+@app.get("/api/clients/{client_id}/versions/{name}", dependencies=[Depends(require_admin)])
+def download_version(client_id: str, name: str):
+    _client_or_404(client_id)
+    try:
+        return FileResponse(storage.version_path(client_id, name), media_type="application/zip", filename=name)
+    except KeyError:
+        raise HTTPException(404, "Version not found")
+
+
+@app.post("/api/clients/{client_id}/versions/{name}/restore", dependencies=[Depends(require_admin)])
+def restore_version(client_id: str, name: str):
+    _client_or_404(client_id)
+    try:
+        return storage.restore_version(client_id, name)
+    except KeyError:
+        raise HTTPException(404, "Version not found")
 
 
 # ---- data + chat ---------------------------------------------------------

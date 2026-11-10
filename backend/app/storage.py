@@ -1,14 +1,21 @@
 """File-based client registry: DATA_DIR/clients/<client_id>/{client.json, files/<kind>.<ext>}"""
+import io
 import json
 import re
 import shutil
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import ALLOWED_EXTENSIONS, DATA_DIR, FILE_KINDS
 
 CLIENTS_DIR = DATA_DIR / "clients"
+KEEP_VERSIONS = 5
+
+
+class LoadRequired(Exception):
+    """Replacing/removing existing files requires an open 'new data load'."""
 
 
 def _client_dir(client_id: str) -> Path:
@@ -58,6 +65,9 @@ def _public(client_id: str, meta: dict) -> dict:
         "notes": meta.get("notes", {}),
         "files": files,
         "ready": all(files.values()),
+        "loading": bool(meta.get("load")),
+        "replaced": (meta.get("load") or {}).get("replaced", []),
+        "load_snapshot": (meta.get("load") or {}).get("snapshot"),
         "created_at": meta["created_at"],
     }
 
@@ -112,20 +122,112 @@ def save_file(client_id: str, kind: str, filename: str, fileobj) -> dict:
     d = _client_dir(client_id) / "files"
     d.mkdir(exist_ok=True)
     old = file_path(client_id, kind)
+    if old and not meta.get("load"):
+        raise LoadRequired("Start a new data load before replacing existing files.")
     if old:
         old.unlink()
     with open(d / f"{kind}{ext}", "wb") as out:
         shutil.copyfileobj(fileobj, out)
     meta.setdefault("filenames", {})[kind] = filename
+    load = meta.get("load")
+    if load is not None:
+        if kind not in load["replaced"]:
+            load["replaced"].append(kind)
+        if set(load["replaced"]) >= set(FILE_KINDS):  # all five refreshed -> load complete
+            meta.pop("load")
     _write(client_id, meta)
     return _public(client_id, meta)
 
 
-def delete_file(client_id: str, kind: str) -> dict:
+def delete_file(client_id: str, kind: str, force: bool = False) -> dict:
     meta = _read(client_id)
     p = file_path(client_id, kind)
+    if p and not force and not meta.get("load"):
+        raise LoadRequired("Start a new data load before removing existing files.")
     if p:
         p.unlink()
     meta.get("filenames", {}).pop(kind, None)
+    _write(client_id, meta)
+    return _public(client_id, meta)
+
+
+# ---- versioning: zip snapshots of the 5 files + client.json, one per data load -------------
+def _archive_dir(client_id: str) -> Path:
+    return _client_dir(client_id) / "archive"
+
+
+def snapshot(client_id: str) -> str | None:
+    """Zip the current files + client.json. Keeps only the newest KEEP_VERSIONS. Returns the zip name."""
+    d = _client_dir(client_id)
+    files = [p for k in FILE_KINDS if (p := file_path(client_id, k))]
+    if not files:
+        return None
+    arch = _archive_dir(client_id)
+    arch.mkdir(exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    name, n = f"{stamp}.zip", 1
+    while (arch / name).exists():
+        name, n = f"{stamp}-{n}.zip", n + 1
+    with zipfile.ZipFile(arch / name, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(d / "client.json", "client.json")
+        for p in files:
+            z.write(p, f"files/{p.name}")
+    for old in sorted(arch.glob("*.zip"))[:-KEEP_VERSIONS]:
+        old.unlink()
+    return name
+
+
+def start_load(client_id: str) -> dict:
+    meta = _read(client_id)
+    if not meta.get("load"):  # idempotent: an open load keeps its original snapshot
+        name = snapshot(client_id)
+        meta = _read(client_id)
+        meta["load"] = {"started_at": datetime.now(timezone.utc).isoformat(), "replaced": [], "snapshot": name}
+        _write(client_id, meta)
+    return _public(client_id, meta)
+
+
+def finish_load(client_id: str) -> dict:
+    meta = _read(client_id)
+    meta.pop("load", None)
+    _write(client_id, meta)
+    return _public(client_id, meta)
+
+
+_ZIP_NAME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(-\d+)?\.zip")
+
+
+def list_versions(client_id: str) -> list[dict]:
+    _read(client_id)
+    arch = _archive_dir(client_id)
+    out = []
+    for p in sorted(arch.glob("*.zip"), reverse=True) if arch.exists() else []:
+        out.append({"name": p.name, "size": p.stat().st_size,
+                    "created_at": datetime.strptime(p.name[:20], "%Y-%m-%dT%H-%M-%SZ")
+                    .replace(tzinfo=timezone.utc).isoformat()})
+    return out
+
+
+def version_path(client_id: str, name: str) -> Path:
+    _read(client_id)
+    if not _ZIP_NAME.fullmatch(name) or not (_archive_dir(client_id) / name).exists():
+        raise KeyError(name)
+    return _archive_dir(client_id) / name
+
+
+def restore_version(client_id: str, name: str) -> dict:
+    zbytes = version_path(client_id, name).read_bytes()  # read first: snapshot below may prune it
+    snapshot(client_id)  # keep what's current so a restore can itself be undone
+    d = _client_dir(client_id)
+    with zipfile.ZipFile(io.BytesIO(zbytes)) as z:
+        allowed = {"client.json"} | {f"files/{k}{e}" for k in FILE_KINDS for e in ALLOWED_EXTENSIONS}
+        names = [n for n in z.namelist() if n in allowed]
+        for old in (d / "files").glob("*"):
+            old.unlink()
+        for n in names:
+            (d / n).parent.mkdir(exist_ok=True)
+            (d / n).write_bytes(z.read(n))
+    meta = _read(client_id)
+    meta.pop("load", None)
     _write(client_id, meta)
     return _public(client_id, meta)

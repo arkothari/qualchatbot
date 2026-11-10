@@ -42,6 +42,16 @@ export const api = {
   },
   deleteFile: (id, kind) =>
     request(`/clients/${id}/files/${kind}`, { method: "DELETE", admin: true }),
+  startLoad: (id) => request(`/clients/${id}/load/start`, { method: "POST", admin: true }),
+  finishLoad: (id) => request(`/clients/${id}/load/finish`, { method: "POST", admin: true }),
+  versions: (id) => request(`/clients/${id}/versions`, { admin: true }),
+  restoreVersion: (id, name) =>
+    request(`/clients/${id}/versions/${name}/restore`, { method: "POST", admin: true }),
+  downloadVersion: async (id, name) => {
+    const res = await fetch(`/api/clients/${id}/versions/${name}`, { headers: { "X-Admin-Token": getAdminToken() } });
+    if (!res.ok) throw new Error("Download failed");
+    return res.blob();
+  },
   schema: (id) => request(`/clients/${id}/schema`),
   chat: (id, messages, model, detail) =>
     request(`/clients/${id}/chat`, { method: "POST", body: { messages, model, detail } }),

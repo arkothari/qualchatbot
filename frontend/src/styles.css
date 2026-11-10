@@ -82,3 +82,9 @@ code { background: var(--p-l); color: var(--heading); padding: 1px 6px; border-r
 .switch input:checked + i { background: var(--p); }
 .switch input:checked + i::after { transform: translateX(18px); }
 .switch input:focus-visible + i { outline: 2px solid var(--o); outline-offset: 2px; }
+.banner { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: var(--p-l); border: 1px solid var(--p-m); border-radius: var(--r); padding: 10px 14px; margin-bottom: 8px; }
+.banner button:not(.link) { margin-left: auto; }
+.btn.disabled { opacity: .5; cursor: not-allowed; }
+.versions { margin: 8px 0; }
+.versions summary { cursor: pointer; font-weight: 600; color: var(--heading); }
+.versions li { padding: 4px 0; }

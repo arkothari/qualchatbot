@@ -13,6 +13,7 @@ export default function Admin() {
   const [error, setError] = useState("");
   const [busyKind, setBusyKind] = useState("");
 
+  const [versions, setVersions] = useState([]);
   const sel = clients.find((c) => c.id === selId);
 
   const refresh = () => api.listClients().then(setClients).catch((e) => setError(e.message));
@@ -26,6 +27,11 @@ export default function Admin() {
     if (!cfg.admin_protected) return setAuthed(true);
     if (getAdminToken()) api.adminCheck().then(() => setAuthed(true)).catch(() => {});
   }, [cfg]);
+
+  useEffect(() => {
+    if (authed && selId) api.versions(selId).then(setVersions).catch(() => setVersions([]));
+    else setVersions([]);
+  }, [authed, selId, sel?.loading]);
 
   useEffect(() => {
     if (authed) refresh();
@@ -82,6 +88,34 @@ export default function Admin() {
     await refresh();
   });
 
+  const startLoad = guard(async () => {
+    await api.startLoad(sel.id);
+    await refresh();
+  });
+
+  const finishLoad = guard(async () => {
+    await api.finishLoad(sel.id);
+    await refresh();
+  });
+
+  const restore = guard(async (v) => {
+    if (!confirm(`Restore the version from ${new Date(v.created_at).toLocaleString()}? The current files are archived first.`)) return;
+    await api.restoreVersion(sel.id, v.name);
+    await refresh();
+    setVersions(await api.versions(sel.id));
+  });
+
+  const download = guard(async (v) => {
+    const url = URL.createObjectURL(await api.downloadVersion(sel.id, v.name));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${sel.name}-${v.name}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  const hasFiles = sel && Object.values(sel.files).some(Boolean);
+
   const deleteClient = guard(async () => {
     if (!confirm(`Delete client "${sel.name}" and all its files? This cannot be undone.`)) return;
     await api.deleteClient(sel.id);
@@ -131,6 +165,38 @@ export default function Admin() {
             onBlur={(e) => e.target.value !== sel.description && saveMeta({ description: e.target.value })}
           />
 
+          <h3>Data load</h3>
+          {sel.loading ? (
+            <div className="banner">
+              <strong>New data load in progress</strong> — {sel.replaced.length}/5 files replaced. Previous version
+              saved{sel.load_snapshot ? ` as ${sel.load_snapshot}` : ""}. The load ends automatically once all 5
+              are replaced.
+              <button className="link" onClick={finishLoad}>Finish load</button>
+            </div>
+          ) : hasFiles ? (
+            <div className="banner">
+              To replace existing files, start a new data load. This saves the current files as a version first
+              (last 5 versions kept).
+              <button onClick={startLoad}>Start new data load</button>
+            </div>
+          ) : (
+            <p className="muted">No files yet — the first upload needs no data load.</p>
+          )}
+          {versions.length > 0 && (
+            <details className="versions">
+              <summary>Version history ({versions.length})</summary>
+              <ul>
+                {versions.map((v) => (
+                  <li key={v.name}>
+                    {new Date(v.created_at).toLocaleString()} · {fmtSize(v.size)}
+                    <button className="link" onClick={() => download(v)}>Download</button>
+                    <button className="link" onClick={() => restore(v)}>Restore</button>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
           <h3>Files</h3>
           <table className="files">
             <thead>
@@ -139,6 +205,7 @@ export default function Admin() {
             <tbody>
               {Object.entries(cfg.file_kinds).map(([kind, label]) => {
                 const f = sel.files[kind];
+                const locked = !!f && !sel.loading;
                 return (
                   <tr key={kind}>
                     <td><strong>{label}</strong><br /><code>{kind}</code></td>
@@ -157,12 +224,12 @@ export default function Admin() {
                       />
                     </td>
                     <td className="actions">
-                      <label className="btn">
+                      <label className={`btn${locked ? " disabled" : ""}`} title={locked ? "Start a new data load first" : ""}>
                         {f ? "Replace" : "Upload"}
-                        <input type="file" hidden accept=".csv,.xlsx,.xls,.parquet"
+                        <input type="file" hidden disabled={locked} accept=".csv,.xlsx,.xls,.parquet"
                           onChange={(e) => { upload(kind, e.target.files[0]); e.target.value = ""; }} />
                       </label>
-                      {f && <button className="link" onClick={() => remove(kind)}>Remove</button>}
+                      {f && <button className="link" disabled={locked} onClick={() => remove(kind)}>Remove</button>}
                     </td>
                   </tr>
                 );
